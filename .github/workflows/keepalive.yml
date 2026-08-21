@@ -1,0 +1,44 @@
+name: casehitz-keepalive
+
+# Keeps the casehitz.com Render service warm so visitors never hit a cold-start
+# (Render's free tier sleeps a web service after ~15 min idle). This pings the
+# public health endpoint every ~10 minutes. It sends NO data and needs NO secrets.
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (well under Render's 15-min sleep)
+    - cron: "17 6 * * *"     # once daily: self-commit so GitHub never auto-disables the schedule
+  workflow_dispatch: {}        # allow manual "Run workflow"
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    if: github.event.schedule != '17 6 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping casehitz health endpoint
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -m 30 -o /dev/null -w "%{http_code}" https://casehitz.com/healthz || echo 000)
+            echo "attempt $i -> HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 20   # first hit may be waking a slept instance; give it a moment then retry
+          done
+          echo "casehitz did not return 200 after 3 attempts (it may still be waking)."
+          # Do not fail the run for a transient cold-start; the next tick will warm it.
+          exit 0
+
+  heartbeat:
+    if: github.event.schedule == '17 6 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Daily heartbeat commit (keeps the scheduled workflow from being auto-disabled)
+        run: |
+          git config user.name "keepalive-bot"
+          git config user.email "keepalive-bot@users.noreply.github.com"
+          date -u +"%Y-%m-%dT%H:%M:%SZ last warm-ping heartbeat" > HEARTBEAT.txt
+          git add HEARTBEAT.txt
+          git commit -m "chore: daily keepalive heartbeat" || echo "nothing to commit"
+          git push || echo "push skipped"
